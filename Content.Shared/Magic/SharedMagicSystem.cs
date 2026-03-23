@@ -6,6 +6,7 @@ using Content.Shared.Charges.Systems;
 using Content.Shared.Coordinates.Helpers;
 using Content.Shared.Doors.Components;
 using Content.Shared.Doors.Systems;
+using Content.Shared.Examine;
 using Content.Shared.Hands.Components;
 using Content.Shared.Hands.EntitySystems;
 using Content.Shared.Interaction;
@@ -32,6 +33,7 @@ using Robust.Shared.Prototypes;
 using Robust.Shared.Random;
 using Robust.Shared.Serialization.Manager;
 using Robust.Shared.Spawners;
+using Content.Shared.Buckle; // imp
 
 namespace Content.Shared.Magic;
 
@@ -66,6 +68,8 @@ public abstract class SharedMagicSystem : EntitySystem
     [Dependency] private readonly SharedStunSystem _stun = default!;
     [Dependency] private readonly TurfSystem _turf = default!;
     [Dependency] private readonly SharedChargesSystem _charges = default!;
+    [Dependency] private readonly ExamineSystemShared _examine= default!;
+    [Dependency] private readonly SharedBuckleSystem _buckle = default!; // imp
 
     private static readonly ProtoId<TagPrototype> InvalidForGlobalSpawnSpellTag = "InvalidForGlobalSpawnSpell";
 
@@ -140,7 +144,7 @@ public abstract class SharedMagicSystem : EntitySystem
 
         foreach (var position in GetInstantSpawnPositions(transform, args.PosData))
         {
-            SpawnSpellHelper(args.Prototype, position, args.Performer, preventCollide: args.PreventCollideWithCaster);
+            SpawnSpellHelper(args.Prototype, position, args.Performer, preventCollide: args.PreventCollideWithCaster, tryBuckle: args.TryBuckle); // imp edit, add TryBuckle
         }
 
         args.Handled = true;
@@ -282,7 +286,7 @@ public abstract class SharedMagicSystem : EntitySystem
         var ent = Spawn(ev.Prototype, fromMap);
         var direction = _transform.ToMapCoordinates(toCoords).Position -
                          fromMap.Position;
-        _gunSystem.ShootProjectile(ent, direction, userVelocity, ev.Performer, ev.Performer);
+        _gunSystem.ShootProjectile(ent, direction, userVelocity, ev.Performer, ev.Performer, 25f);
     }
     // End Projectile Spells
     #endregion
@@ -332,7 +336,7 @@ public abstract class SharedMagicSystem : EntitySystem
     // End Teleport Spells
     #endregion
     #region Spell Helpers
-    private void SpawnSpellHelper(string? proto, EntityCoordinates position, EntityUid performer, float? lifetime = null, bool preventCollide = false)
+    private void SpawnSpellHelper(string? proto, EntityCoordinates position, EntityUid performer, float? lifetime = null, bool preventCollide = false, bool tryBuckle = false) // imp edit, add TryBuckle
     {
         if (!_net.IsServer)
             return;
@@ -350,6 +354,13 @@ public abstract class SharedMagicSystem : EntitySystem
             var comp = EnsureComp<PreventCollideComponent>(ent);
             comp.Uid = performer;
         }
+
+        // imp edit start
+        if (tryBuckle)
+        {
+            _buckle.TryBuckle(performer, performer, ent);
+        }
+        // imp edit end
     }
 
     private void AddComponents(EntityUid target, ComponentRegistry comps)
@@ -399,22 +410,30 @@ public abstract class SharedMagicSystem : EntitySystem
     #endregion
     #region Knock Spells
     /// <summary>
-    /// Opens all doors and locks within range
+    /// Opens all doors and locks within range.
     /// </summary>
-    /// <param name="args"></param>
     private void OnKnockSpell(KnockSpellEvent args)
     {
         if (args.Handled || !PassesSpellPrerequisites(args.Action, args.Performer))
             return;
 
         args.Handled = true;
+        Knock(args.Performer, args.Range);
+    }
 
-        var transform = Transform(args.Performer);
+    /// <summary>
+    /// Opens all doors and locks within range.
+    /// </summary>
+    /// <param name="performer">Performer of spell. </param>
+    /// <param name="range">Radius around <see cref="performer"/> in which all doors and locks should be opened.</param>
+    public void Knock(EntityUid performer, float range)
+    {
+        var transform = Transform(performer);
 
         // Look for doors and lockers, and don't open/unlock them if they're already opened/unlocked.
-        foreach (var target in _lookup.GetEntitiesInRange(_transform.GetMapCoordinates(args.Performer, transform), args.Range, flags: LookupFlags.Dynamic | LookupFlags.Static))
+        foreach (var target in _lookup.GetEntitiesInRange(_transform.GetMapCoordinates(performer, transform), range, flags: LookupFlags.Dynamic | LookupFlags.Static))
         {
-            if (!_interaction.InRangeUnobstructed(args.Performer, target, range: 0, collisionMask: CollisionGroup.Opaque))
+            if (!_examine.InRangeUnOccluded(performer, target, range: 0))
                 continue;
 
             if (TryComp<DoorBoltComponent>(target, out var doorBoltComp) && doorBoltComp.BoltsDown)
@@ -424,7 +443,7 @@ public abstract class SharedMagicSystem : EntitySystem
                 _door.StartOpening(target);
 
             if (TryComp<LockComponent>(target, out var lockComp) && lockComp.Locked)
-                _lock.Unlock(target, args.Performer, lockComp);
+                _lock.Unlock(target, performer, lockComp);
         }
     }
     // End Knock Spells
